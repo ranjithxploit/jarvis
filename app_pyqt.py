@@ -6,6 +6,7 @@ import pandas as pd
 import speech_recognition as sr
 import pyttsx3
 import time
+import queue
 
 try:
     import google.generativeai as genai
@@ -47,7 +48,9 @@ class VortexCore:
         self.setup_tts()
         self.setup_data_storage()
         self.task_history = []
-        self.tts_lock = threading.Lock()
+        self.tts_queue = queue.Queue()
+        self.tts_worker_running = True
+        self.start_tts_worker()
 
     def setup_tts(self):
         try:
@@ -60,6 +63,63 @@ class VortexCore:
         except Exception as e:
             print(f"TTS setup error: {e}")
             self.tts_engine = None
+
+    def start_tts_worker(self):
+        """Start a dedicated worker thread for TTS operations"""
+        def tts_worker():
+            while self.tts_worker_running:
+                try:
+                    # Get text from queue with timeout
+                    text = self.tts_queue.get(timeout=1.0)
+                    if text is None:  # Sentinel value to stop worker
+                        break
+                    
+                    # Perform TTS operation
+                    self._do_speak(text)
+                    self.tts_queue.task_done()
+                except queue.Empty:
+                    continue
+                except Exception as e:
+                    print(f"TTS Worker Error: {e}")
+        
+        self.tts_thread = threading.Thread(target=tts_worker, daemon=True)
+        self.tts_thread.start()
+
+    def _do_speak(self, text):
+        """Internal method to actually perform TTS - runs in dedicated thread"""
+        try:
+            if not self.tts_engine:
+                print("TTS engine not available")
+                return
+                
+            import re
+            clean_text = re.sub(r'[^\n\w\s\.,!\-:\(\)]', '', text)
+            clean_text = clean_text.strip()
+            
+            if clean_text:
+                print(f"Speaking: {clean_text[:50]}...")
+                
+                # Stop any current speech and clear queue
+                try:
+                    self.tts_engine.stop()
+                    time.sleep(0.1)
+                except:
+                    pass
+                    
+                # Speak the text
+                self.tts_engine.say(clean_text)
+                self.tts_engine.runAndWait()
+                print("Speech completed")
+        except Exception as e:
+            print(f"TTS Error: {e}")
+            # Try to reinitialize TTS engine if it fails
+            try:
+                self.tts_engine = pyttsx3.init()
+                self.setup_tts()
+                print("TTS engine reinitialized")
+            except Exception as e2:
+                print(f"TTS reinit failed: {e2}")
+                self.tts_engine = None
 
     def setup_data_storage(self):
         os.makedirs('vortex_data', exist_ok=True)
@@ -106,39 +166,26 @@ class VortexCore:
             print(f"Error saving conversation: {e}")
 
     def speak(self, text):
-        with self.tts_lock:  # Ensure only one TTS operation at a time
-            try:
-                if not self.tts_engine:
-                    print("TTS engine not available")
-                    return
-                    
-                import re
-                clean_text = re.sub(r'[^\n\w\s\.,!\-:\(\)]', '', text)
-                clean_text = clean_text.strip()
-                
-                if clean_text:
-                    print(f"Speaking: {clean_text[:50]}...")
-                    # Stop any current speech
-                    try:
-                        self.tts_engine.stop()
-                        time.sleep(0.1)  # Small delay to ensure stop command is processed
-                    except:
-                        pass
-                        
-                    # Speak the text
-                    self.tts_engine.say(clean_text)
-                    self.tts_engine.runAndWait()
-                    print("Speech completed")
-            except Exception as e:
-                print(f"TTS Error: {e}")
-                # Try to reinitialize TTS engine if it fails
+        """Queue text for speaking - non-blocking"""
+        try:
+            # Clear existing items in queue to prevent backup
+            while not self.tts_queue.empty():
                 try:
-                    self.tts_engine = pyttsx3.init()
-                    self.setup_tts()
-                    print("TTS engine reinitialized")
-                except Exception as e2:
-                    print(f"TTS reinit failed: {e2}")
-                    self.tts_engine = None
+                    self.tts_queue.get_nowait()
+                    self.tts_queue.task_done()
+                except queue.Empty:
+                    break
+            
+            # Add new text to queue
+            self.tts_queue.put(text)
+            print(f"Queued for speech: {text[:50]}...")
+        except Exception as e:
+            print(f"Speech queue error: {e}")
+
+    def stop_tts_worker(self):
+        """Stop the TTS worker thread"""
+        self.tts_worker_running = False
+        self.tts_queue.put(None)  # Sentinel value
 
     def get_ai_response(self, user_input):
         try:
@@ -447,13 +494,9 @@ class VortexMainWindow(QMainWindow):
         for task in self.vortex.task_history[-5:]:
             self.task_history.add_task(task['timestamp'], task['type'], task['description'])
 
-        def speak_thread():
-            try:
-                self.vortex.speak(ai_response)
-            except Exception as e:
-                print(f"TTS Error: {e}")
-
-        threading.Thread(target=speak_thread, daemon=True).start()
+        # Speak the response using the queue system
+        self.vortex.speak(ai_response)
+        
         self.status_label.setStyleSheet("color: #00FF00; margin: 5px;")
         self.input_field.setFocus()
 
@@ -490,6 +533,9 @@ class VortexMainWindow(QMainWindow):
     def closeEvent(self, event):
         if hasattr(self, 'task_window'):
             self.task_window.close()
+        # Clean up TTS worker
+        if hasattr(self.vortex, 'stop_tts_worker'):
+            self.vortex.stop_tts_worker()
         event.accept()
 
 
