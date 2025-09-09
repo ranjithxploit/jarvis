@@ -5,6 +5,7 @@ from datetime import datetime
 import pandas as pd
 import speech_recognition as sr
 import pyttsx3
+import time
 
 try:
     import google.generativeai as genai
@@ -31,7 +32,7 @@ class VortexCore:
             api_key = os.getenv('GEMINI_API_KEY')
             if api_key and genai:
                 genai.configure(api_key=api_key)
-                self.model = genai.GenerativeModel('gemini-pro')
+                self.model = genai.GenerativeModel('gemini-1.5-flash')
                 print("Gemini AI configured successfully!")
             elif api_key and not genai:
                 print("GEMINI_API_KEY provided but google.generativeai package not available.")
@@ -46,13 +47,19 @@ class VortexCore:
         self.setup_tts()
         self.setup_data_storage()
         self.task_history = []
+        self.tts_lock = threading.Lock()
 
     def setup_tts(self):
-        voices = self.tts_engine.getProperty('voices')
-        if voices:
-            self.tts_engine.setProperty('voice', voices[0].id)
-        self.tts_engine.setProperty('rate', 200)
-        self.tts_engine.setProperty('volume', 0.8)
+        try:
+            voices = self.tts_engine.getProperty('voices')
+            if voices:
+                self.tts_engine.setProperty('voice', voices[0].id)
+            self.tts_engine.setProperty('rate', 200)
+            self.tts_engine.setProperty('volume', 0.8)
+            print("TTS initialized successfully")
+        except Exception as e:
+            print(f"TTS setup error: {e}")
+            self.tts_engine = None
 
     def setup_data_storage(self):
         os.makedirs('vortex_data', exist_ok=True)
@@ -83,6 +90,7 @@ class VortexCore:
             df.to_excel(self.tasks_file, index=False)
         except Exception as e:
             print(f"Error saving task: {e}")
+            #just foor the sake of it
 
     def save_conversation(self, user_input, ai_response):
         try:
@@ -98,12 +106,39 @@ class VortexCore:
             print(f"Error saving conversation: {e}")
 
     def speak(self, text):
-        import re
-        clean_text = re.sub(r'[^\n\w\s\.,!\-:\(\)]', '', text)
-        clean_text = clean_text.strip()
-        if clean_text:
-            self.tts_engine.say(clean_text)
-            self.tts_engine.runAndWait()
+        with self.tts_lock:  # Ensure only one TTS operation at a time
+            try:
+                if not self.tts_engine:
+                    print("TTS engine not available")
+                    return
+                    
+                import re
+                clean_text = re.sub(r'[^\n\w\s\.,!\-:\(\)]', '', text)
+                clean_text = clean_text.strip()
+                
+                if clean_text:
+                    print(f"Speaking: {clean_text[:50]}...")
+                    # Stop any current speech
+                    try:
+                        self.tts_engine.stop()
+                        time.sleep(0.1)  # Small delay to ensure stop command is processed
+                    except:
+                        pass
+                        
+                    # Speak the text
+                    self.tts_engine.say(clean_text)
+                    self.tts_engine.runAndWait()
+                    print("Speech completed")
+            except Exception as e:
+                print(f"TTS Error: {e}")
+                # Try to reinitialize TTS engine if it fails
+                try:
+                    self.tts_engine = pyttsx3.init()
+                    self.setup_tts()
+                    print("TTS engine reinitialized")
+                except Exception as e2:
+                    print(f"TTS reinit failed: {e2}")
+                    self.tts_engine = None
 
     def get_ai_response(self, user_input):
         try:
