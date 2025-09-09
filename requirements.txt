@@ -1,0 +1,8 @@
+PyQt5
+pandas
+SpeechRecognition
+google-generative-ai
+python-dotenv
+openpyxl
+openai
+pyttsx3
