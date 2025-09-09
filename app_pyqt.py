@@ -121,8 +121,9 @@ class VortexCore:
                 if 'browser' in user_lower:
                     self.add_task_to_history('BROWSER', 'Opening web browser')
                     return 'Opening your default browser.'
-            return f"I heard '{user_input}'. I can help, but full AI requires GEMINI_API_KEY."
-
+                return f"I heard '{user_input}'. I can help, but full AI requires GEMINI_API_KEY."
+            
+            # If model is available, use AI
             prompt = f"You are VORTEX, an assistant. User request: {user_input}\nRespond concisely." 
             response = self.model.generate_content(prompt)
             return response.text
