@@ -150,7 +150,6 @@ class VortexCore:
             df.to_excel(self.tasks_file, index=False)
         except Exception as e:
             print(f"Error saving task: {e}")
-            #just foor the sake of it
 
     def save_conversation(self, user_input, ai_response):
         try:
@@ -215,23 +214,40 @@ class VortexCore:
     def listen(self):
         try:
             with self.microphone as source:
-                self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.3)
                 audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=3)
             text = self.recognizer.recognize_google(audio, language='en-US').lower()
+            print(f"[DEBUG] Heard: {text}")
             if 'vortex' in text:
+                print("[DEBUG] Wake word 'VORTEX' detected! Listening for command...")
                 return self.listen_for_command()
             return None
-        except Exception:
+        except sr.WaitTimeoutError:
+            # Normal timeout, don't spam logs
+            return None
+        except Exception as e:
+            # Only log actual errors, not timeouts
+            if "listening timed out" not in str(e).lower():
+                print(f"[DEBUG] Listen error: {e}")
             return None
 
     def listen_for_command(self):
         try:
+            print("[DEBUG] Ready for command - speak now...")
             with self.microphone as source:
-                audio = self.recognizer.listen(source, timeout=10, phrase_time_limit=15)
+                # Give user more time to start speaking after wake word
+                self.recognizer.adjust_for_ambient_noise(source, duration=0.3)
+                # Longer timeout to wait for user to start speaking
+                audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=10)
             text = self.recognizer.recognize_google(audio, language='en-US')
+            print(f"[DEBUG] Command received: {text}")
             return text
+        except sr.WaitTimeoutError:
+            print("[DEBUG] No command received within timeout")
+            return None
         except Exception as e:
-            print(f"Command recognition error: {e}")
+            if "listening timed out" not in str(e).lower():
+                print(f"[DEBUG] Command recognition error: {e}")
             return None
 
 
@@ -256,6 +272,7 @@ class TaskHistoryWidget(QWidget):
 
 class ContinuousListenThread(QThread):
     command_detected = pyqtSignal(str)
+    status_update = pyqtSignal(str, str)  # message, color
 
     def __init__(self, core):
         super().__init__()
@@ -268,10 +285,13 @@ class ContinuousListenThread(QThread):
             try:
                 command = self.core.listen()
                 if command:
+                    self.status_update.emit("Processing command...", "#FFAA00")
                     self.command_detected.emit(command)
-                    self.msleep(800)
+                    # Wait a bit longer after processing a command
+                    self.msleep(1500)
+                    self.status_update.emit("LISTENING", "#00FF00")
                 else:
-                    self.msleep(200)
+                    self.msleep(100)  # Shorter sleep when no command
             except Exception as e:
                 print(f"Continuous listening error: {e}")
                 self.msleep(1000)
@@ -507,21 +527,32 @@ class VortexMainWindow(QMainWindow):
             self.listening_active = True
             self.voice_btn.setText("STOP")
             self.voice_btn.setStyleSheet("background: rgba(255,0,0,120); color: white; border:none; border-radius:20px;")
+            self.status_label.setText("LISTENING")
+            self.status_label.setStyleSheet("color: #00FF00; margin: 5px;")
             self.update_status("Continuous listening active - Say 'VORTEX' to activate")
             self.listen_thread = ContinuousListenThread(self.vortex)
             self.listen_thread.command_detected.connect(self.process_voice_command)
+            self.listen_thread.status_update.connect(self.update_status_display)
             self.listen_thread.start()
         else:
             self.listening_active = False
             self.voice_btn.setText("MIC")
             self.voice_btn.setStyleSheet("")
+            self.status_label.setText("ONLINE")
+            self.status_label.setStyleSheet("color: #00FF00; margin: 5px;")
             if hasattr(self, 'listen_thread'):
                 self.listen_thread.stop()
 
     def process_voice_command(self, command):
+        print(f"[DEBUG] process_voice_command received: {command}")
         if command:
             self.input_field.setText(command)
             self.send_message()
+
+    def update_status_display(self, message, color):
+        """Update status label with message and color"""
+        self.status_label.setText(message)
+        self.status_label.setStyleSheet(f"color: {color}; margin: 5px;")
 
     def update_status(self, message):
         print(message)
