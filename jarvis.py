@@ -36,7 +36,6 @@ def remove_emojis(text: str) -> str:
                                "]+", flags=re.UNICODE)
     return emoji_pattern.sub('', text).strip()
 
-
 class LogHandler(logging.Handler):
     def __init__(self, log_widget):
         super().__init__()
@@ -71,7 +70,6 @@ class TransparentTextWidget(QWidget):
     def paintEvent(self, event):
         pass
 
-
 class ChatWidget(TransparentTextWidget):
     message_received = pyqtSignal(str, str)
     def __init__(self, jarvis_ai: JarvisBrain, parent=None):
@@ -83,25 +81,20 @@ class ChatWidget(TransparentTextWidget):
         self.microphone = sr.Microphone()
         self.voice_thread = None
         self.speech_lock = threading.Lock()
-        
-        # Enhanced microphone setup with better ambient noise adjustment
         self.setup_microphone()
         
         self.init_ui()
         self.message_received.connect(self.add_message)
     
     def setup_microphone(self):
-        """Setup microphone with proper ambient noise adjustment"""
         try:
             print("Setting up microphone...")
             with self.microphone as source:
                 print("Adjusting for ambient noise...")
-                # Better ambient noise adjustment with longer duration
                 self.recognizer.adjust_for_ambient_noise(source, duration=1.5)
                 print("Microphone setup complete!")
         except Exception as e:
             print(f"Microphone setup warning: {e}")
-            # Continue anyway - we'll handle errors during listening
         
     def init_ui(self):
         layout = QVBoxLayout()
@@ -153,8 +146,6 @@ class ChatWidget(TransparentTextWidget):
 
         self.add_message("JARVIS online!. Ready for commands sir!", "system")
         layout.addWidget(self.messages_area, 1)
-        
-        # Control buttons
         controls_layout = QHBoxLayout()
         controls_layout.setSpacing(10)
         
@@ -184,14 +175,12 @@ class ChatWidget(TransparentTextWidget):
             }
         """)
         self.voice_btn.clicked.connect(self.toggle_voice_listening)
-        
-        # Wake word button
         self.wake_word_btn = QPushButton("💤 WAKE WORD")
         self.wake_word_btn.setFixedHeight(45)
         self.wake_word_btn.setStyleSheet("""
             QPushButton {
                 color: #FFFF00;
-                background-color: rgba(0, 0, 0, 100);
+                background-color: rgba(0, 0, 0, 100);  #wake word button
                 border: 2px solid #FFFF00;
                 border-radius: 8px;
                 font-family: 'Consolas', 'Courier New', monospace;
@@ -358,25 +347,26 @@ class ChatWidget(TransparentTextWidget):
     def process_message(self, message: str):
         try:
             print(f"Processing: {message}")
-            
             response = self.jarvis_ai.process_user_input(message)
             print(f"Jarvis response received: {response}")
-            
-            # Handle both Dict and string responses
             if isinstance(response, dict):
                 display_text = response.get("text", "")
                 speech_text = response.get("speech", "") or display_text
             else:
                 display_text = str(response)
                 speech_text = display_text
-            
-            # Remove emojis from display text
+            import re, json
+            code_match = re.search(r"```json\s*\n(.*?)```", display_text, re.DOTALL)
+            if code_match:
+                try:
+                    payload = json.loads(code_match.group(1).strip())
+                    display_text = payload.get("text", display_text)
+                    speech_text = payload.get("speech", speech_text)
+                except json.JSONDecodeError:
+                    pass
             display_text = remove_emojis(display_text)
             speech_text = remove_emojis(speech_text)
-            
             self.message_received.emit(display_text, "ai")
-            
-            # Use speech text for TTS
             if speech_text:
                 speech_thread = threading.Thread(
                     target=self.speak_response,
@@ -508,108 +498,80 @@ class ChatWidget(TransparentTextWidget):
                     print(f"System speech fallback failed: {fallback_error}")
     
     def listen_for_voice(self):
-        """Enhanced voice listening with better parameters and error handling"""
-        while self.is_listening:
+        """Continuous voice listening until manually toggled off"""
+        print("🎤 Microphone is now ACTIVE - Listening continuously...")
+        
+        def callback(recognizer, audio):
+            """Background callback for processing audio when detected"""
             try:
-                print("Listening for voice...")
+                text = recognizer.recognize_google(audio)
+                print(f"✅ Recognized: {text}")
+                QMetaObject.invokeMethod(
+                    self,
+                    "process_voice_input",
+                    Qt.QueuedConnection,
+                    Q_ARG(str, text)
+                )
+            except sr.UnknownValueError:
+                print("Could not understand audio - still listening...")
+            except sr.RequestError as e:
+                print(f"Speech recognition error: {e}")
+        
+        try:
+            with self.microphone as source:
+                self.recognizer.adjust_for_ambient_noise(source, duration=1)
+                print("Ambient noise adjusted - Microphone ready!")
+            
+            self.stop_listening = self.recognizer.listen_in_background(
+                self.microphone, 
+                callback,
+                phrase_time_limit=10 
+            )
+            while self.is_listening:
+                time.sleep(0.1)
+            if hasattr(self, 'stop_listening'):
+                self.stop_listening(wait_for_stop=False)
+                print("Microphone stopped - No longer listening")
                 
-                # Re-adjust for ambient noise periodically
-                with self.microphone as source:
-                    self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                    # Better listening parameters
-                    audio = self.recognizer.listen(
-                        source, 
-                        timeout=2,          # Wait up to 2 seconds for speech to start
-                        phrase_time_limit=8  # Allow up to 8 seconds for complete phrase
-                    )
-                
-                try:
-                    # Use Google Speech Recognition for better accuracy
-                    text = self.recognizer.recognize_google(audio)
-                    print(f"Recognized: {text}")
-                    
-                    # Process the recognized text
-                    QMetaObject.invokeMethod(
-                        self,
-                        "process_voice_input",
-                        Qt.QueuedConnection,
-                        Q_ARG(str, text)
-                    )
-                    
-                except sr.UnknownValueError:
-                    # Speech was unintelligible - continue listening
-                    print("Could not understand audio, continuing...")
-                    continue
-                    
-                except sr.RequestError as e:
-                    print(f"Google Speech Recognition error: {e}")
-                    # Try to continue with local recognition if available
-                    continue
-                    
-            except sr.WaitTimeoutError:
-                # No speech detected within timeout - this is normal
-                continue
-                
-            except OSError as e:
-                print(f"Microphone access error: {e}")
-                # Try to reinitialize microphone
-                try:
-                    self.setup_microphone()
-                    time.sleep(1)
-                except:
-                    print("Failed to reinitialize microphone")
-                    break
-                    
-            except Exception as e:
-                print(f"Voice recognition error: {e}")
-                # Small delay before retrying
-                time.sleep(0.5)
-                continue
+        except Exception as e:
+            print(f"Voice listening error: {e}")
+            if hasattr(self, 'stop_listening'):
+                self.stop_listening(wait_for_stop=False)
     
     def listen_once(self, timeout: int = 5, phrase_time_limit: int = 10) -> Optional[str]:
-        """Single voice input with improved settings"""
         try:
             print("Listening for single input...")
             with self.microphone as source:
-                # Adjust for ambient noise
                 self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                # Listen with better parameters
                 audio = self.recognizer.listen(
                     source, 
                     timeout=timeout, 
                     phrase_time_limit=phrase_time_limit
                 )
-            
-            # Recognize speech
             text = self.recognizer.recognize_google(audio)
             print(f"Single input recognized: {text}")
             return text.strip()
-            
         except sr.WaitTimeoutError:
             print("Listening timeout - no speech detected")
             return None
         except sr.UnknownValueError:
             print("Could not understand the audio")
-            return None
+            return None 
         except sr.RequestError as e:
             print(f"Speech recognition service error: {e}")
             return None
         except Exception as e:
             print(f"Error in single listen: {e}")
             return None
-    
+
     def detect_wake_word(self, wake_word: str = "jarvis") -> bool:
-        """Detect wake word in speech input - inspired by example implementation"""
         try:
             with self.microphone as source:
                 self.recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                # Short listening for wake word detection
                 audio = self.recognizer.listen(source, timeout=1, phrase_time_limit=3)
-            
             text = self.recognizer.recognize_google(audio).lower().strip()
             print(f"Wake word detection heard: {text}")
             return wake_word.lower() in text
-            
         except sr.WaitTimeoutError:
             return False
         except sr.UnknownValueError:
@@ -617,33 +579,29 @@ class ChatWidget(TransparentTextWidget):
         except Exception as e:
             print(f"Wake word detection error: {e}")
             return False
-    
     def start_wake_word_mode(self):
-        """Start continuous wake word detection mode"""
         print("Starting wake word detection mode...")
         
         def wake_word_loop():
             while True:
                 try:
-                    if not self.is_listening:  # Only listen for wake word when not actively listening
+                    if not self.is_listening:
                         if self.detect_wake_word():
                             print("Wake word detected! Activating voice mode...")
-                            # Activate voice listening mode
                             QMetaObject.invokeMethod(
                                 self,
                                 "toggle_voice_listening",
                                 Qt.QueuedConnection
                             )
-                            time.sleep(2)  # Prevent immediate re-triggering
+                            time.sleep(2)  
                     else:
-                        time.sleep(0.5)  # Wait while in active listening mode
+                        time.sleep(0.5)
                 except Exception as e:
                     print(f"Wake word loop error: {e}")
                     time.sleep(1)
         
         wake_word_thread = threading.Thread(target=wake_word_loop, daemon=True)
         wake_word_thread.start()
-        
         self.add_message("Wake word detection started. Say 'Jarvis' to activate voice mode.", "system")
     
     @pyqtSlot(str)
@@ -657,10 +615,8 @@ class ChatWidget(TransparentTextWidget):
     def toggle_voice_listening(self):
         self.is_listening = not self.is_listening
         if self.is_listening:
-            # Re-setup microphone when starting voice listening
             self.setup_microphone()
-            
-            self.voice_btn.setText("🎤 MIC ON")
+            self.voice_btn.setText("MIC ON")
             self.voice_btn.setStyleSheet("""
                 QPushButton {
                     color: #FF0000;
