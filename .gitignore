@@ -5,6 +5,7 @@
 
 # JARVIS Data Directory
 jarvis_data/
+vortex_data/
 *.db
 *.sqlite
 
@@ -15,6 +16,9 @@ logs/
 # Python
 __pycache__/
 *.py[cod]
+*.pyc
+*.pyo
+*.pyd
 *$py.class
 *.so
 .Python
@@ -130,3 +134,7 @@ $RECYCLE.BIN/
 # Temporary files
 *.tmp
 *.temp
+
+# Old/backup files
+*_old.py
+*_backup.py
