@@ -43,10 +43,7 @@ word_to_number = {
 
 class JarvisAI:
     def __init__(self, gemini_api_key: Optional[str] = None, groq_api_key: Optional[str] = None, data_dir: str = "jarvis_data"):
-        """Initialize Jarvis AI Assistant with Agentic capabilities"""
         logger.info("Initializing Jarvis")
-        
-        # Load API keys from environment if not provided
         self.gemini_api_key = gemini_api_key or os.getenv('GEMINI_API_KEY')
         self.groq_api_key = groq_api_key or os.getenv('GROQ_API_KEY')
         if not self.gemini_api_key or not self.groq_api_key:
@@ -61,8 +58,6 @@ class JarvisAI:
         self.gemini_model = genai.GenerativeModel('gemini-1.5-flash')
         self.groq_model = ChatGroq(model_name="llama3-70b-convolution", groq_api_key=self.groq_api_key, temperature=0)
         logger.info("AI models initialized")
-        
-        # Initialize TTS and STT
         logger.info("Initializing speech systems...")
         self.tts_engine = pyttsx3.init()
         self.setup_voice()
@@ -79,8 +74,6 @@ class JarvisAI:
         except Exception as e:
             logger.error(f"Failed to load sentence transformer: {e}")
             self.sentence_model = None
-        
-        # File paths
         self.conversations_file = self.data_dir / "conversations.xlsx"
         self.tasks_file = self.data_dir / "tasks.xlsx"
         self.vector_db_file = self.data_dir / "vector_db.pkl"
@@ -115,11 +108,10 @@ class JarvisAI:
                         voice_set = True
                         break
                 if voice_set:
-                    break
-        
-        self.tts_engine.setProperty('rate', 180)
+                    breakpoint
+        self.tts_engine.setProperty('rate', 210)
         self.tts_engine.setProperty('volume', 1.0)
-    
+        
     def setup_agents(self):
         self.tools = [
             Tool(
