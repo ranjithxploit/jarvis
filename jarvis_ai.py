@@ -3,7 +3,7 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 import json
-import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 from typing import List, Dict, Any, Optional
@@ -17,6 +17,12 @@ import threading
 import time
 from pathlib import Path
 import logging
+import subprocess
+import platform
+import requests
+import json
+from datetime import datetime, timedelta
+
 from langchain.agents import Tool, AgentExecutor, create_react_agent
 from langchain import hub
 from langchain_groq import ChatGroq
@@ -33,6 +39,17 @@ from PyQt5.QtGui import (QFont, QPalette, QColor, QPixmap, QPainter,
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Check for enhanced audio packages
+try:
+    import sounddevice as sd
+    import speexdsp
+    import webrtcvad
+    AUDIO_ENHANCED = True
+    logger.info("Enhanced audio packages available")
+except ImportError:
+    AUDIO_ENHANCED = False
+    logger.warning("Enhanced audio packages not available. Install: pip install sounddevice speexdsp webrtcvad")
 
 word_to_number = {
     "zero": 0, "one": 1, "two": 2, "three": 3,
@@ -92,6 +109,10 @@ class JarvisAI:
         self.setup_agents()
         self.conversation_chain = []
         
+        # Initialize timers and system control
+        self.active_timers = {}
+        self.stopwatches = {}
+        
         logger.info("Jarvis AI Assistant initialized successfully!")
     
     def setup_voice(self):
@@ -143,6 +164,36 @@ class JarvisAI:
                 name="get_user_context",
                 func=self.agent_get_user_context,
                 description="Get user context including preferences and frequent topics."
+            ),
+            Tool(
+                name="start_timer",
+                func=self.agent_start_timer,
+                description="Start a timer. Input should be 'duration_in_minutes,timer_name' or just 'duration_in_minutes'."
+            ),
+            Tool(
+                name="start_stopwatch",
+                func=self.agent_start_stopwatch,
+                description="Start a stopwatch. Input should be stopwatch name."
+            ),
+            Tool(
+                name="stop_timer",
+                func=self.agent_stop_timer,
+                description="Stop a timer. Input should be timer name or 'all' to stop all timers."
+            ),
+            Tool(
+                name="get_system_info",
+                func=self.agent_get_system_info,
+                description="Get current date, time, and system information."
+            ),
+            Tool(
+                name="control_volume",
+                func=self.agent_control_volume,
+                description="Control system volume. Input should be 'up', 'down', 'mute', or a number 0-100."
+            ),
+            Tool(
+                name="daily_summary",
+                func=self.agent_daily_summary,
+                description="Get daily summary with date, time, weather, and tasks."
             )
         ]
         self.prompt_react = hub.pull("hwchase17/react")
@@ -214,6 +265,188 @@ class JarvisAI:
         context += f"Recent conversations: {len(self.user_context['conversation_history'])}"
         
         return context
+    
+    def agent_start_timer(self, input_string: str) -> str:
+        """Start a timer with specified duration"""
+        try:
+            parts = input_string.split(',')
+            duration = float(parts[0].strip())
+            timer_name = parts[1].strip() if len(parts) > 1 else f"Timer_{len(self.active_timers)+1}"
+            
+            if timer_name in self.active_timers:
+                return f"Timer '{timer_name}' is already running"
+            
+            # Start timer in separate thread
+            timer_thread = threading.Timer(duration * 60, self._timer_finished, [timer_name, duration])
+            timer_thread.start()
+            
+            self.active_timers[timer_name] = {
+                'duration': duration,
+                'start_time': datetime.now(),
+                'thread': timer_thread
+            }
+            
+            return f"Timer '{timer_name}' started for {duration} minutes"
+        except Exception as e:
+            return f"Error starting timer: {str(e)}"
+    
+    def agent_start_stopwatch(self, input_string: str) -> str:
+        """Start a stopwatch"""
+        try:
+            stopwatch_name = input_string.strip() or f"Stopwatch_{len(self.stopwatches)+1}"
+            
+            if stopwatch_name in self.stopwatches:
+                return f"Stopwatch '{stopwatch_name}' is already running"
+            
+            self.stopwatches[stopwatch_name] = {
+                'start_time': datetime.now(),
+                'is_running': True
+            }
+            
+            return f"Stopwatch '{stopwatch_name}' started"
+        except Exception as e:
+            return f"Error starting stopwatch: {str(e)}"
+    
+    def agent_stop_timer(self, input_string: str) -> str:
+        """Stop a timer or stopwatch"""
+        try:
+            name = input_string.strip()
+            
+            if name == "all":
+                for timer_name, timer_info in self.active_timers.items():
+                    timer_info['thread'].cancel()
+                self.active_timers.clear()
+                self.stopwatches.clear()
+                return "All timers and stopwatches stopped"
+            
+            if name in self.active_timers:
+                self.active_timers[name]['thread'].cancel()
+                del self.active_timers[name]
+                return f"Timer '{name}' stopped"
+            
+            if name in self.stopwatches:
+                elapsed = datetime.now() - self.stopwatches[name]['start_time']
+                del self.stopwatches[name]
+                return f"Stopwatch '{name}' stopped. Elapsed time: {str(elapsed)}"
+            
+            return f"No timer or stopwatch named '{name}' found"
+        except Exception as e:
+            return f"Error stopping timer: {str(e)}"
+    
+    def agent_get_system_info(self, input_string: str = "") -> str:
+        """Get current system information"""
+        try:
+            now = datetime.now()
+            info = f"Current date: {now.strftime('%Y-%m-%d')}\n"
+            info += f"Current time: {now.strftime('%H:%M:%S')}\n"
+            info += f"Day of week: {now.strftime('%A')}\n"
+            info += f"System: {platform.system()} {platform.release()}\n"
+            
+            # Add active timers info
+            if self.active_timers:
+                info += f"Active timers: {len(self.active_timers)}\n"
+            if self.stopwatches:
+                info += f"Active stopwatches: {len(self.stopwatches)}\n"
+            
+            return info
+        except Exception as e:
+            return f"Error getting system info: {str(e)}"
+    
+    def agent_control_volume(self, input_string: str) -> str:
+        """Enhanced volume control with more options"""
+        try:
+            command = input_string.strip().lower()
+            
+            if platform.system() == "Windows":
+                if command in ["up", "increase", "raise", "louder"]:
+                    subprocess.run(["powershell", "-c", "(New-Object -comObject WScript.Shell).SendKeys([char]175)"], check=True)
+                    return "Volume increased"
+                elif command in ["down", "decrease", "lower", "quieter"]:
+                    subprocess.run(["powershell", "-c", "(New-Object -comObject WScript.Shell).SendKeys([char]174)"], check=True)
+                    return "Volume decreased"
+                elif command in ["mute", "silence", "quiet"]:
+                    subprocess.run(["powershell", "-c", "(New-Object -comObject WScript.Shell).SendKeys([char]173)"], check=True)
+                    return "Volume muted/unmuted"
+                elif command.replace("%", "").replace("percent", "").replace(" ", "").isdigit():
+                    # Extract number for specific volume level
+                    volume = int(''.join(filter(str.isdigit, command)))
+                    volume = max(0, min(100, volume))
+                    # Use NirCmd for specific volume setting if available
+                    try:
+                        subprocess.run(["nircmd.exe", "setsysvolume", str(int(volume * 655.35))], check=True)
+                        return f"Volume set to {volume}%"
+                    except:
+                        # Fallback to multiple key presses
+                        subprocess.run(["powershell", "-c", "(New-Object -comObject WScript.Shell).SendKeys([char]173)"], check=True)  # Mute first
+                        subprocess.run(["powershell", "-c", "(New-Object -comObject WScript.Shell).SendKeys([char]173)"], check=True)  # Unmute
+                        for _ in range(volume // 2):  # Approximate volume adjustment
+                            subprocess.run(["powershell", "-c", "(New-Object -comObject WScript.Shell).SendKeys([char]175)"], check=True)
+                        return f"Volume adjusted to approximately {volume}%"
+                elif "maximum" in command or "max" in command or "full" in command:
+                    for _ in range(50):  # Max out volume
+                        subprocess.run(["powershell", "-c", "(New-Object -comObject WScript.Shell).SendKeys([char]175)"], check=True)
+                    return "Volume set to maximum"
+                elif "minimum" in command or "min" in command or "lowest" in command:
+                    for _ in range(50):  # Min volume
+                        subprocess.run(["powershell", "-c", "(New-Object -comObject WScript.Shell).SendKeys([char]174)"], check=True)
+                    return "Volume set to minimum"
+                else:
+                    return f"Unknown volume command: {command}. Try 'up', 'down', 'mute', or a percentage like '50%'"
+            
+            return "Volume control not supported on this system"
+        except Exception as e:
+            return f"Error controlling volume: {str(e)}"
+    
+    def agent_daily_summary(self, input_string: str = "") -> str:
+        """Get daily summary with date, time, weather, and tasks"""
+        try:
+            now = datetime.now()
+            summary = f"◊ DAILY BRIEFING ◊\n\n"
+            summary += f"Date: {now.strftime('%A, %B %d, %Y')}\n"
+            summary += f"Time: {now.strftime('%H:%M:%S')}\n\n"
+            
+            # Tasks summary
+            pending_tasks = [t for t in self.tasks if t.get('status') == 'pending']
+            completed_tasks = [t for t in self.tasks if t.get('status') == 'completed']
+            
+            summary += f"MISSION STATUS:\n"
+            summary += f"• Pending missions: {len(pending_tasks)}\n"
+            summary += f"• Completed missions: {len(completed_tasks)}\n\n"
+            
+            if pending_tasks:
+                summary += "PRIORITY MISSIONS:\n"
+                for task in pending_tasks[:3]:  # Show top 3
+                    summary += f"• {task['description']}\n"
+            
+            # Active timers/stopwatches
+            if self.active_timers or self.stopwatches:
+                summary += f"\nACTIVE OPERATIONS:\n"
+                for name, info in self.active_timers.items():
+                    elapsed = datetime.now() - info['start_time']
+                    remaining = timedelta(minutes=info['duration']) - elapsed
+                    summary += f"• Timer '{name}': {str(remaining).split('.')[0]} remaining\n"
+                
+                for name, info in self.stopwatches.items():
+                    elapsed = datetime.now() - info['start_time']
+                    summary += f"• Stopwatch '{name}': {str(elapsed).split('.')[0]} elapsed\n"
+            
+            return summary
+        except Exception as e:
+            return f"Error generating daily summary: {str(e)}"
+    
+    def _timer_finished(self, timer_name: str, duration: float):
+        """Called when a timer finishes"""
+        if timer_name in self.active_timers:
+            del self.active_timers[timer_name]
+        
+        # This will be called by GUI to speak the notification
+        notification = f"Timer '{timer_name}' for {duration} minutes has finished!"
+        logger.info(f"Timer finished: {notification}")
+        
+        # Store notification for GUI to pick up
+        if not hasattr(self, 'timer_notifications'):
+            self.timer_notifications = []
+        self.timer_notifications.append(notification)
 
     def load_data(self):
         try:
@@ -296,7 +529,7 @@ class JarvisAI:
                 'text': text,
                 'embedding': embedding,
                 'metadata': metadata,
-                'timestamp': datetime.datetime.now().isoformat()
+                'timestamp': datetime.now().isoformat()
             }
             self.vector_db.append(vector_item)
             if self.faiss_index is not None:
@@ -328,7 +561,11 @@ class JarvisAI:
     def should_use_agent(self, user_input: str) -> bool:
         agent_keywords = [
             'task', 'add', 'complete', 'finish', 'what did', 'previous', 
-            'before', 'earlier', 'context', 'search', 'find', 'look for', 'remember'
+            'before', 'earlier', 'context', 'search', 'find', 'look for', 'remember',
+            'timer', 'stopwatch', 'start', 'stop', 'time', 'minute', 'hour',
+            'volume', 'sound', 'audio', 'loud', 'quiet', 'mute', 'increase', 'decrease',
+            'up', 'down', 'percent', '%', 'maximum', 'minimum', 'daily', 'summary',
+            'briefing', 'date', 'system', 'info'
         ]
         user_lower = user_input.lower()
         return any(keyword in user_lower for keyword in agent_keywords)
@@ -390,7 +627,7 @@ class JarvisAI:
     def save_conversation(self, user_input: str, ai_response: str):
         """Save conversation to Excel and vector database"""
         conversation = {
-            'timestamp': datetime.datetime.now().isoformat(),
+            'timestamp': datetime.now().isoformat(),
             'user_input': user_input,
             'ai_response': ai_response,
             'conversation_id': len(self.conversations) + 1
@@ -413,7 +650,7 @@ class JarvisAI:
         # Add to conversation history
         self.user_context['conversation_history'].append({
             'input': user_input,
-            'timestamp': datetime.datetime.now().isoformat()
+            'timestamp': datetime.now().isoformat()
         })
         if len(self.user_context['conversation_history']) > 70:
             self.user_context['conversation_history'] = self.user_context['conversation_history'][-70:]
@@ -432,7 +669,7 @@ class JarvisAI:
             'due_date': due_date if due_date else "",
             'priority': priority,
             'status': 'pending',
-            'created_at': datetime.datetime.now().isoformat()
+            'created_at': datetime.now().isoformat()
         }
         self.tasks.append(task)
         self.save_data()
@@ -449,7 +686,7 @@ class JarvisAI:
         for task in self.tasks:
             if task['id'] == task_id:
                 task['status'] = new_status
-                task['updated_at'] = datetime.datetime.now().isoformat()
+                task['updated_at'] = datetime.now().isoformat()
                 self.save_data()
                 return f"Task {task_id} status updated to {new_status}"
         return f"Task {task_id} not found"
@@ -514,51 +751,111 @@ class SpeechThread(QThread):
 
 
 class TransparentWidget(QWidget):
+    """Custom transparent widget with Iron Man holographic effect"""
     
     def __init__(self):
         super().__init__()
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.animation_frame = 0
         
     def paintEvent(self, event):
+        """Paint Iron Man-style holographic background with blue/cyan theme"""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        gradient = QRadialGradient(self.width()//2, self.height()//2, min(self.width(), self.height())//2)
-        gradient.setColorAt(0, QColor(0, 245, 255, 20))
-        gradient.setColorAt(1, QColor(0, 128, 255, 10))
         
-        painter.setBrush(QBrush(gradient))
-        painter.setPen(QPen(QColor(0, 245, 255, 80), 2))
-        painter.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 20, 20)
+        # Dark Iron Man base with gradient
+        painter.fillRect(self.rect(), QColor(5, 10, 25, 200))
+        
+        # Iron Man holographic grid lines (blue/cyan)
+        painter.setPen(QPen(QColor(0, 162, 255, 60), 1))
+        grid_size = 60
+        for x in range(0, self.width(), grid_size):
+            painter.drawLine(x, 0, x, self.height())
+        for y in range(0, self.height(), grid_size):
+            painter.drawLine(0, y, self.width(), y)
+        
+        # Animated scan lines (Iron Man blue)
+        scan_y = (self.animation_frame * 2) % self.height()
+        painter.setPen(QPen(QColor(0, 245, 255, 120), 3))
+        painter.drawLine(0, scan_y, self.width(), scan_y)
+        painter.drawLine(0, (scan_y + 300) % self.height(), self.width(), (scan_y + 300) % self.height())
+        
+        # Iron Man corner brackets (blue/cyan theme)
+        bracket_size = 40
+        painter.setPen(QPen(QColor(0, 245, 255, 200), 4))
+        # Top-left
+        painter.drawLine(15, 15, 15 + bracket_size, 15)
+        painter.drawLine(15, 15, 15, 15 + bracket_size)
+        # Top-right
+        painter.drawLine(self.width() - 15 - bracket_size, 15, self.width() - 15, 15)
+        painter.drawLine(self.width() - 15, 15, self.width() - 15, 15 + bracket_size)
+        # Bottom-left
+        painter.drawLine(15, self.height() - 15, 15 + bracket_size, self.height() - 15)
+        painter.drawLine(15, self.height() - 15 - bracket_size, 15, self.height() - 15)
+        # Bottom-right
+        painter.drawLine(self.width() - 15 - bracket_size, self.height() - 15, self.width() - 15, self.height() - 15)
+        painter.drawLine(self.width() - 15, self.height() - 15 - bracket_size, self.width() - 15, self.height() - 15)
+        
+        # Additional Iron Man-style decorative elements
+        painter.setPen(QPen(QColor(0, 162, 255, 100), 2))
+        painter.drawLine(self.width()//4, 5, 3*self.width()//4, 5)
+        painter.drawLine(self.width()//4, self.height()-5, 3*self.width()//4, self.height()-5)
+        
+        self.animation_frame += 1
 
 
-class AnimatedButton(QPushButton):    
+class AnimatedButton(QPushButton):
+    """Iron Man-style holographic button with advanced animations"""
+    
     def __init__(self, text):
         super().__init__(text)
+        self.animation_timer = QTimer()
+        self.animation_timer.timeout.connect(self.update_animation)
+        self.animation_timer.start(50)
+        self.glow_intensity = 0
+        self.glow_direction = 1
+        
         self.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 rgba(0, 245, 255, 180),
-                    stop:1 rgba(0, 128, 255, 180));
-                border: 2px solid rgba(0, 245, 255, 100);
-                border-radius: 15px;
-                padding: 10px 20px;
-                color: white;
+                    stop:0 rgba(0, 20, 40, 180),
+                    stop:0.5 rgba(0, 100, 200, 120),
+                    stop:1 rgba(0, 245, 255, 180));
+                border: 2px solid rgba(0, 245, 255, 150);
+                border-radius: 8px;
+                padding: 12px 24px;
+                color: rgba(255, 255, 255, 220);
                 font-weight: bold;
                 font-size: 14px;
+                font-family: 'Orbitron', 'Consolas', monospace;
+                text-transform: uppercase;
+                letter-spacing: 1px;
             }
             QPushButton:hover {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 rgba(0, 245, 255, 220),
-                    stop:1 rgba(0, 128, 255, 220));
-                border: 2px solid rgba(0, 245, 255, 150);
+                    stop:0 rgba(0, 40, 80, 200),
+                    stop:0.5 rgba(0, 150, 255, 160),
+                    stop:1 rgba(0, 245, 255, 220));
+                border: 2px solid rgba(0, 245, 255, 200);
+                color: white;
             }
             QPushButton:pressed {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 rgba(0, 128, 255, 200),
-                    stop:1 rgba(0, 80, 200, 200));
+                    stop:0 rgba(0, 245, 255, 255),
+                    stop:1 rgba(0, 150, 255, 180));
+                border: 3px solid rgba(255, 255, 255, 150);
             }
         """)
+    
+    def update_animation(self):
+        """Update button glow animation"""
+        self.glow_intensity += self.glow_direction * 5
+        if self.glow_intensity >= 100:
+            self.glow_direction = -1
+        elif self.glow_intensity <= 0:
+            self.glow_direction = 1
+        self.update()
 
 
 class JarvisGUI(QMainWindow):
@@ -574,7 +871,6 @@ class JarvisGUI(QMainWindow):
         self.response_thread = None
         self.speech_thread = None   
         self.is_listening = False
-        self.is_speaking = False
         
     def init_jarvis(self):
         GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -592,7 +888,7 @@ class JarvisGUI(QMainWindow):
             
     def init_ui(self):
         self.setWindowTitle("JARVIS Neural Interface")
-        self.setGeometry(100, 100, 1400, 900)
+        self.setGeometry(100, 100, 1600, 1000)  # Increased size for new panels
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         central_widget = TransparentWidget()
@@ -600,98 +896,428 @@ class JarvisGUI(QMainWindow):
         main_layout = QHBoxLayout(central_widget)
         main_layout.setSpacing(20)
         main_layout.setContentsMargins(20, 20, 20, 20)
-        self.create_chat_panel(main_layout)
-        self.create_arc_reactor_panel(main_layout)
-        self.create_tasks_panel(main_layout)
+        
+        # Create panels layout
+        left_panel = QVBoxLayout()
+        center_panel = QVBoxLayout()
+        right_panel = QVBoxLayout()
+        
+        self.create_chat_panel(left_panel)
+        self.create_system_info_panel(left_panel)
+        
+        self.create_arc_reactor_panel(center_panel)
+        
+        self.create_tasks_panel(right_panel)
+        self.create_timer_panel(right_panel)
+        
+        main_layout.addLayout(left_panel)
+        main_layout.addLayout(center_panel)
+        main_layout.addLayout(right_panel)
         self.apply_dark_theme()
         self.create_status_bar()
         self.setup_timers()
+    
+    def create_jarvis_button(self, text):
+        """Create Iron Man-style button with blue/cyan theme"""
+        button = QPushButton(text)
+        button.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(0, 20, 40, 180),
+                    stop:0.5 rgba(0, 100, 200, 120),
+                    stop:1 rgba(0, 245, 255, 180));
+                border: 3px solid rgba(0, 245, 255, 180);
+                border-radius: 12px;
+                padding: 15px 30px;
+                color: rgba(255, 255, 255, 255);
+                font-weight: bold;
+                font-size: 15px;
+                font-family: 'Orbitron', 'Consolas', monospace;
+                text-transform: uppercase;
+                letter-spacing: 2px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(0, 40, 80, 200),
+                    stop:0.5 rgba(0, 150, 255, 160),
+                    stop:1 rgba(0, 245, 255, 220));
+                border: 3px solid rgba(0, 245, 255, 220);
+                color: white;
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(0, 245, 255, 255),
+                    stop:1 rgba(0, 150, 255, 180));
+                border: 4px solid rgba(255, 255, 255, 200);
+            }
+        """)
+        return button
     def create_chat_panel(self, parent_layout):
+        """Create authentic JARVIS-style holographic chat panel with white/blue theme"""
         chat_frame = QFrame()
-        chat_frame.setFixedWidth(420)
+        chat_frame.setFixedWidth(500)
         chat_frame.setStyleSheet("""
             QFrame {
-                background: rgba(15, 15, 35, 150);
-                border: 2px solid rgba(0, 245, 255, 80);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(240, 248, 255, 25),
+                    stop:0.5 rgba(135, 206, 250, 35),
+                    stop:1 rgba(0, 191, 255, 45));
+                border: 3px solid rgba(255, 255, 255, 180);
                 border-radius: 20px;
+                background-clip: padding-box;
             }
         """)
         
         chat_layout = QVBoxLayout(chat_frame)
-        chat_layout.setSpacing(15)
-        chat_layout.setContentsMargins(20, 20, 20, 20)
-        header_label = QLabel("NEURAL INTERFACE")
+        chat_layout.setSpacing(25)
+        chat_layout.setContentsMargins(30, 30, 30, 30)
+        
+        # Header with authentic JARVIS styling
+        header_label = QLabel("◊ J.A.R.V.I.S NEURAL INTERFACE ◊")
         header_label.setStyleSheet("""
             QLabel {
-                color: rgb(0, 245, 255);
+                color: rgba(255, 255, 255, 255);
+                font-family: 'Orbitron', 'Consolas', monospace;
+                font-weight: bold;
+                font-size: 20px;
+                text-align: center;
+                padding: 20px;
+                border: none;
+                border-bottom: 3px solid rgba(255, 255, 255, 150);
+                margin-bottom: 20px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(255, 255, 255, 30),
+                    stop:0.5 rgba(255, 255, 255, 60),
+                    stop:1 rgba(255, 255, 255, 30));
+                text-transform: uppercase;
+                letter-spacing: 3px;
+            }
+        """)
+        header_label.setAlignment(Qt.AlignCenter)
+        chat_layout.addWidget(header_label)
+        
+        # Enhanced chat messages area with JARVIS styling
+        self.chat_messages = QTextEdit()
+        self.chat_messages.setReadOnly(True)
+        self.chat_messages.setStyleSheet("""
+            QTextEdit {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(240, 248, 255, 40),
+                    stop:1 rgba(173, 216, 230, 60));
+                border: 2px solid rgba(255, 255, 255, 120);
+                border-radius: 15px;
+                padding: 25px;
+                color: rgba(25, 25, 112, 255);
+                font-size: 16px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                line-height: 1.8;
+                selection-background-color: rgba(0, 191, 255, 150);
+            }
+            QScrollBar:vertical {
+                background: rgba(240, 248, 255, 200);
+                width: 16px;
+                border-radius: 8px;
+                border: 2px solid rgba(255, 255, 255, 120);
+            }
+            QScrollBar::handle:vertical {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(135, 206, 250, 220),
+                    stop:1 rgba(255, 255, 255, 250));
+                border-radius: 6px;
+                min-height: 30px;
+                border: 1px solid rgba(0, 191, 255, 100);
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(255, 255, 255, 255);
+                border: 2px solid rgba(0, 191, 255, 200);
+            }
+            QScrollBar::add-line, QScrollBar::sub-line {
+                border: none;
+                background: none;
+            }
+        """)
+        chat_layout.addWidget(self.chat_messages)
+        
+        # Control panel with JARVIS holographic styling
+        controls_frame = QFrame()
+        controls_frame.setStyleSheet("""
+            QFrame {
+                background: rgba(240, 248, 255, 80);
+                border: 2px solid rgba(255, 255, 255, 100);
+                border-radius: 15px;
+                padding: 15px;
+            }
+        """)
+        controls_layout = QVBoxLayout(controls_frame)
+        
+        # Input layout
+        input_layout = QHBoxLayout()
+        
+        self.message_input = QLineEdit()
+        self.message_input.setPlaceholderText("◊ Enter command sequence...")
+        self.message_input.setStyleSheet("""
+            QLineEdit {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(255, 255, 255, 120),
+                    stop:1 rgba(240, 248, 255, 140));
+                border: 3px solid rgba(255, 255, 255, 150);
+                border-radius: 12px;
+                padding: 18px 25px;
+                color: rgba(25, 25, 112, 255);
+                font-size: 15px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                selection-background-color: rgba(0, 191, 255, 150);
+                font-weight: bold;
+            }
+            QLineEdit:focus {
+                border: 3px solid rgba(0, 191, 255, 220);
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(255, 255, 255, 160),
+                    stop:1 rgba(240, 248, 255, 180));
+                color: rgba(25, 25, 112, 255);
+            }
+            QLineEdit::placeholder {
+                color: rgba(70, 130, 180, 180);
+                font-style: italic;
+            }
+        """)
+        self.message_input.returnPressed.connect(self.send_message)
+        input_layout.addWidget(self.message_input)
+        
+        # Buttons layout with JARVIS styling
+        buttons_layout = QHBoxLayout()
+        
+        self.send_btn = self.create_jarvis_button("◊ TRANSMIT")
+        self.send_btn.clicked.connect(self.send_message)
+        buttons_layout.addWidget(self.send_btn)
+        
+        self.voice_btn = self.create_jarvis_button("🎤 VOICE")
+        self.voice_btn.clicked.connect(self.toggle_voice)
+        self.voice_btn.setFixedWidth(130)
+        buttons_layout.addWidget(self.voice_btn)
+        
+        self.quit_btn = self.create_jarvis_button("◊ SHUTDOWN")
+        self.quit_btn.clicked.connect(self.close)
+        self.quit_btn.setFixedWidth(150)
+        self.quit_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(220, 20, 60, 150),
+                    stop:0.5 rgba(255, 99, 71, 120),
+                    stop:1 rgba(255, 69, 0, 150));
+                border: 3px solid rgba(255, 255, 255, 180);
+                border-radius: 12px;
+                padding: 15px 30px;
+                color: rgba(255, 255, 255, 255);
+                font-weight: bold;
+                font-size: 15px;
+                font-family: 'Orbitron', 'Consolas', monospace;
+                text-transform: uppercase;
+                letter-spacing: 2px;
+                text-shadow: 0 0 8px rgba(255, 255, 255, 150);
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(255, 69, 0, 200),
+                    stop:0.5 rgba(255, 99, 71, 160),
+                    stop:1 rgba(220, 20, 60, 200));
+                border: 3px solid rgba(255, 255, 255, 220);
+                box-shadow: 0 0 20px rgba(255, 69, 0, 100);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(255, 0, 0, 255),
+                    stop:1 rgba(220, 20, 60, 200));
+                border: 4px solid rgba(255, 255, 255, 200);
+            }
+        """)
+        buttons_layout.addWidget(self.quit_btn)
+        
+        controls_layout.addLayout(input_layout)
+        controls_layout.addLayout(buttons_layout)
+        chat_layout.addWidget(controls_frame)
+        
+        parent_layout.addWidget(chat_frame)
+        
+        # Welcome message with JARVIS flair
+        self.add_message("◊ J.A.R.V.I.S NEURAL INTERFACE ONLINE ◊\n\nGood evening, Sir. All systems operational and standing by for your commands. How may I assist you today?", "ai")
+    
+    def create_system_info_panel(self, parent_layout):
+        """Create system information and daily summary panel"""
+        info_frame = QFrame()
+        info_frame.setFixedWidth(500)
+        info_frame.setMaximumHeight(200)
+        info_frame.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(240, 248, 255, 20),
+                    stop:0.5 rgba(173, 216, 230, 30),
+                    stop:1 rgba(135, 206, 250, 40));
+                border: 2px solid rgba(255, 255, 255, 120);
+                border-radius: 15px;
+            }
+        """)
+        
+        info_layout = QVBoxLayout(info_frame)
+        info_layout.setSpacing(15)
+        info_layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Header
+        info_header = QLabel("◊ SYSTEM STATUS ◊")
+        info_header.setStyleSheet("""
+            QLabel {
+                color: rgba(255, 255, 255, 255);
                 font-family: 'Orbitron', monospace;
                 font-weight: bold;
                 font-size: 16px;
                 text-align: center;
                 padding: 10px;
-                border-bottom: 1px solid rgba(0, 245, 255, 80);
-                margin-bottom: 10px;
+                border-bottom: 2px solid rgba(255, 255, 255, 100);
+                text-shadow: 0 0 8px rgba(255, 255, 255, 100);
             }
         """)
-        header_label.setAlignment(Qt.AlignCenter)
-        chat_layout.addWidget(header_label)
-        self.chat_messages = QTextEdit()
-        self.chat_messages.setReadOnly(True)
-        self.chat_messages.setStyleSheet("""
-            QTextEdit {
-                background: rgba(0, 0, 0, 100);
-                border: 1px solid rgba(0, 245, 255, 50);
-                border-radius: 15px;
-                padding: 15px;
-                color: white;
-                font-size: 14px;
-                line-height: 1.5;
-            }
-            QScrollBar:vertical {
-                background: rgba(0, 0, 0, 100);
-                width: 10px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical {
-                background: rgba(0, 245, 255, 150);
-                border-radius: 5px;
-            }
-        """)
-        chat_layout.addWidget(self.chat_messages)
-        input_layout = QHBoxLayout()
+        info_header.setAlignment(Qt.AlignCenter)
+        info_layout.addWidget(info_header)
         
-        self.message_input = QLineEdit()
-        self.message_input.setPlaceholderText("Enter your command...")
-        self.message_input.setStyleSheet("""
-            QLineEdit {
-                background: rgba(0, 245, 255, 30);
-                border: 2px solid rgba(0, 245, 255, 80);
+        # System info display
+        self.system_info_display = QLabel()
+        self.system_info_display.setStyleSheet("""
+            QLabel {
+                color: rgba(255, 255, 255, 240);
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 15px;
+                background: rgba(0, 20, 40, 100);
+                border: 1px solid rgba(0, 162, 255, 80);
+                border-radius: 8px;
+            }
+        """)
+        self.system_info_display.setWordWrap(True)
+        self.system_info_display.setTextFormat(Qt.RichText)  # Enable HTML formatting
+        info_layout.addWidget(self.system_info_display)
+        
+        # Control buttons
+        controls_layout = QHBoxLayout()
+        
+        daily_summary_btn = self.create_jarvis_button("DAILY BRIEF")
+        daily_summary_btn.clicked.connect(self.show_daily_summary)
+        controls_layout.addWidget(daily_summary_btn)
+        
+        volume_up_btn = self.create_jarvis_button("VOL +")
+        volume_up_btn.clicked.connect(lambda: self.control_system("volume_up"))
+        volume_up_btn.setFixedWidth(80)
+        controls_layout.addWidget(volume_up_btn)
+        
+        volume_down_btn = self.create_jarvis_button("VOL -")
+        volume_down_btn.clicked.connect(lambda: self.control_system("volume_down"))
+        volume_down_btn.setFixedWidth(80)
+        controls_layout.addWidget(volume_down_btn)
+        
+        info_layout.addLayout(controls_layout)
+        parent_layout.addWidget(info_frame)
+        
+        # Update system info initially
+        self.update_system_info()
+    
+    def create_timer_panel(self, parent_layout):
+        """Create timer and stopwatch control panel"""
+        timer_frame = QFrame()
+        timer_frame.setFixedWidth(480)
+        timer_frame.setMaximumHeight(300)
+        timer_frame.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(240, 248, 255, 20),
+                    stop:0.5 rgba(173, 216, 230, 30),
+                    stop:1 rgba(135, 206, 250, 40));
+                border: 2px solid rgba(255, 255, 255, 120);
                 border-radius: 15px;
-                padding: 15px 20px;
-                color: white;
-                font-size: 14px;
+            }
+        """)
+        
+        timer_layout = QVBoxLayout(timer_frame)
+        timer_layout.setSpacing(15)
+        timer_layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Header
+        timer_header = QLabel("◊ TEMPORAL OPERATIONS ◊")
+        timer_header.setStyleSheet("""
+            QLabel {
+                color: rgba(255, 255, 255, 255);
+                font-family: 'Orbitron', monospace;
+                font-weight: bold;
+                font-size: 16px;
+                text-align: center;
+                padding: 10px;
+                border-bottom: 2px solid rgba(255, 255, 255, 100);
+                text-shadow: 0 0 8px rgba(255, 255, 255, 100);
+            }
+        """)
+        timer_header.setAlignment(Qt.AlignCenter)
+        timer_layout.addWidget(timer_header)
+        
+        # Timer input
+        timer_input_layout = QHBoxLayout()
+        
+        self.timer_input = QLineEdit()
+        self.timer_input.setPlaceholderText("Timer duration (minutes)...")
+        self.timer_input.setStyleSheet("""
+            QLineEdit {
+                background: rgba(255, 255, 255, 80);
+                border: 2px solid rgba(255, 255, 255, 120);
+                border-radius: 8px;
+                padding: 10px 15px;
+                color: rgba(25, 25, 112, 255);
+                font-size: 13px;
+                font-family: 'Consolas', monospace;
+                font-weight: bold;
             }
             QLineEdit:focus {
-                border: 2px solid rgba(0, 245, 255, 150);
-                background: rgba(0, 245, 255, 50);
+                border: 2px solid rgba(0, 191, 255, 180);
+                background: rgba(255, 255, 255, 120);
             }
         """)
-        self.message_input.returnPressed.connect(self.send_message)
-        input_layout.addWidget(self.message_input)
-        self.send_btn = AnimatedButton("SEND")
-        self.send_btn.clicked.connect(self.send_message)
-        input_layout.addWidget(self.send_btn)
-        self.voice_btn = AnimatedButton("🎤")
-        self.voice_btn.clicked.connect(self.toggle_voice)
-        self.voice_btn.setFixedWidth(60)
-        input_layout.addWidget(self.voice_btn)
+        timer_input_layout.addWidget(self.timer_input)
         
-        chat_layout.addLayout(input_layout)
-        parent_layout.addWidget(chat_frame)
-        self.add_message("Welcome to JARVIS Neural Interface. I'm your advanced AI assistant, ready to help with tasks and intelligent conversation. How may I assist you today?", "ai")
+        start_timer_btn = self.create_jarvis_button("START")
+        start_timer_btn.clicked.connect(self.start_timer_gui)
+        start_timer_btn.setFixedWidth(100)
+        timer_input_layout.addWidget(start_timer_btn)
+        
+        timer_layout.addLayout(timer_input_layout)
+        
+        # Timer display
+        self.timer_display = QLabel("No active timers")
+        self.timer_display.setStyleSheet("""
+            QLabel {
+                color: rgba(25, 25, 112, 255);
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 12px;
+                font-weight: bold;
+                padding: 10px;
+                background: rgba(255, 255, 255, 40);
+                border-radius: 8px;
+            }
+        """)
+        self.timer_display.setWordWrap(True)
+        timer_layout.addWidget(self.timer_display)
+        
+        # Control buttons
+        timer_controls = QHBoxLayout()
+        
+        stopwatch_btn = self.create_jarvis_button("STOPWATCH")
+        stopwatch_btn.clicked.connect(self.start_stopwatch_gui)
+        timer_controls.addWidget(stopwatch_btn)
+        
+        stop_all_btn = self.create_jarvis_button("STOP ALL")
+        stop_all_btn.clicked.connect(self.stop_all_timers)
+        timer_controls.addWidget(stop_all_btn)
+        
+        timer_layout.addLayout(timer_controls)
+        parent_layout.addWidget(timer_frame)
     
     def create_arc_reactor_panel(self, parent_layout):
-        """Create the central arc reactor animation"""
         reactor_frame = QFrame()
         reactor_frame.setFixedSize(300, 300)
         reactor_frame.setStyleSheet("""
@@ -706,92 +1332,144 @@ class JarvisGUI(QMainWindow):
         parent_layout.addWidget(reactor_frame)
     
     def create_tasks_panel(self, parent_layout):
-        """Create the tasks panel"""
         tasks_frame = QFrame()
-        tasks_frame.setFixedWidth(420)
+        tasks_frame.setFixedWidth(480)
         tasks_frame.setStyleSheet("""
             QFrame {
-                background: rgba(15, 15, 35, 150);
-                border: 2px solid rgba(0, 245, 255, 80);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(240, 248, 255, 25),
+                    stop:0.5 rgba(173, 216, 230, 35),
+                    stop:1 rgba(135, 206, 250, 45));
+                border: 3px solid rgba(255, 255, 255, 150);
                 border-radius: 20px;
             }
         """)
         
         tasks_layout = QVBoxLayout(tasks_frame)
-        tasks_layout.setSpacing(15)
-        tasks_layout.setContentsMargins(20, 20, 20, 20)
-        tasks_header = QLabel("MISSION CONTROL")
+        tasks_layout.setSpacing(20)
+        tasks_layout.setContentsMargins(25, 25, 25, 25)
+        
+        tasks_header = QLabel("◊ MISSION CONTROL CENTER ◊")
         tasks_header.setStyleSheet("""
             QLabel {
-                color: rgb(0, 245, 255);
+                color: rgba(255, 255, 255, 255);
                 font-family: 'Orbitron', monospace;
                 font-weight: bold;
-                font-size: 16px;
+                font-size: 18px;
                 text-align: center;
-                padding: 10px;
-                border-bottom: 1px solid rgba(0, 245, 255, 80);
-                margin-bottom: 10px;
+                padding: 15px;
+                border-bottom: 3px solid rgba(255, 255, 255, 120);
+                margin-bottom: 15px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(255, 255, 255, 20),
+                    stop:0.5 rgba(255, 255, 255, 40),
+                    stop:1 rgba(255, 255, 255, 20));
+                text-transform: uppercase;
+                letter-spacing: 2px;
+                text-shadow: 0 0 10px rgba(255, 255, 255, 100);
             }
         """)
         tasks_header.setAlignment(Qt.AlignCenter)
         tasks_layout.addWidget(tasks_header)
+        
         self.tasks_list = QListWidget()
         self.tasks_list.setStyleSheet("""
             QListWidget {
-                background: rgba(0, 0, 0, 100);
-                border: 1px solid rgba(0, 245, 255, 50);
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(240, 248, 255, 60),
+                    stop:1 rgba(173, 216, 230, 80));
+                border: 2px solid rgba(255, 255, 255, 120);
                 border-radius: 15px;
-                padding: 10px;
-                color: white;
-                font-size: 14px;
+                padding: 20px;
+                color: rgba(25, 25, 112, 255);
+                font-size: 15px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-weight: bold;
             }
             QListWidget::item {
-                background: rgba(0, 128, 255, 30);
-                border: 1px solid rgba(0, 245, 255, 60);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(255, 255, 255, 80),
+                    stop:1 rgba(135, 206, 250, 100));
+                border: 2px solid rgba(255, 255, 255, 120);
                 border-radius: 10px;
-                padding: 12px;
-                margin: 5px 0;
+                padding: 15px 20px;
+                margin: 6px 0;
+                color: rgba(25, 25, 112, 255);
+                min-height: 25px;
             }
             QListWidget::item:hover {
-                background: rgba(0, 128, 255, 60);
-                border: 1px solid rgba(0, 245, 255, 100);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(255, 255, 255, 120),
+                    stop:1 rgba(0, 191, 255, 140));
+                border: 2px solid rgba(255, 255, 255, 180);
+                color: rgba(25, 25, 112, 255);
+                box-shadow: 0 0 15px rgba(0, 191, 255, 80);
             }
             QListWidget::item:selected {
-                background: rgba(0, 245, 255, 80);
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(0, 191, 255, 160),
+                    stop:1 rgba(255, 255, 255, 140));
+                border: 3px solid rgba(255, 255, 255, 200);
+                color: rgba(25, 25, 112, 255);
             }
             QScrollBar:vertical {
-                background: rgba(0, 0, 0, 100);
-                width: 10px;
-                border-radius: 5px;
+                background: rgba(240, 248, 255, 200);
+                width: 14px;
+                border-radius: 7px;
+                border: 2px solid rgba(255, 255, 255, 100);
             }
             QScrollBar::handle:vertical {
-                background: rgba(0, 245, 255, 150);
-                border-radius: 5px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 rgba(135, 206, 250, 200),
+                    stop:1 rgba(255, 255, 255, 220));
+                border-radius: 6px;
+                min-height: 30px;
+                border: 1px solid rgba(0, 191, 255, 120);
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(255, 255, 255, 255);
+                border: 2px solid rgba(0, 191, 255, 200);
+            }
+            QScrollBar::add-line, QScrollBar::sub-line {
+                border: none;
+                background: none;
             }
         """)
         self.tasks_list.itemDoubleClicked.connect(self.toggle_task)
         tasks_layout.addWidget(self.tasks_list)
+        
         self.task_input = QLineEdit()
-        self.task_input.setPlaceholderText("Add new mission...")
+        self.task_input.setPlaceholderText("◊ Add new mission objective...")
         self.task_input.setStyleSheet("""
             QLineEdit {
-                background: rgba(0, 245, 255, 30);
-                border: 2px solid rgba(0, 245, 255, 80);
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(255, 255, 255, 100),
+                    stop:1 rgba(240, 248, 255, 120));
+                border: 3px solid rgba(255, 255, 255, 140);
                 border-radius: 15px;
-                padding: 15px 20px;
-                color: white;
-                font-size: 14px;
+                padding: 18px 25px;
+                color: rgba(25, 25, 112, 255);
+                font-size: 15px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-weight: bold;
+                selection-background-color: rgba(0, 191, 255, 150);
             }
             QLineEdit:focus {
-                border: 2px solid rgba(0, 245, 255, 150);
-                background: rgba(0, 245, 255, 50);
+                border: 3px solid rgba(0, 191, 255, 200);
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(255, 255, 255, 140),
+                    stop:1 rgba(240, 248, 255, 160));
+                box-shadow: 0 0 15px rgba(0, 191, 255, 100);
+            }
+            QLineEdit::placeholder {
+                color: rgba(70, 130, 180, 160);
+                font-style: italic;
             }
         """)
         self.task_input.returnPressed.connect(self.add_task)
         tasks_layout.addWidget(self.task_input)
-        
-        # Add task button
-        add_task_btn = AnimatedButton("ADD MISSION")
+
+        add_task_btn = self.create_jarvis_button("◊ ADD MISSION")
         add_task_btn.clicked.connect(self.add_task)
         tasks_layout.addWidget(add_task_btn)
         
@@ -814,40 +1492,167 @@ class JarvisGUI(QMainWindow):
         """)
     
     def create_status_bar(self):
-        self.status_label = QLabel("JARVIS ONLINE")
+        self.status_label = QLabel("◊ J.A.R.V.I.S ONLINE ◊")
         self.status_label.setStyleSheet("""
             QLabel {
-                color: rgb(0, 245, 255);
+                color: rgba(25, 25, 112, 255);
                 font-family: 'Orbitron', monospace;
                 font-weight: bold;
-                font-size: 12px;
-                padding: 5px 15px;
-                background: rgba(0, 0, 0, 100);
-                border: 1px solid rgba(0, 245, 255, 80);
-                border-radius: 10px;
+                font-size: 14px;
+                padding: 8px 20px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(255, 255, 255, 150),
+                    stop:1 rgba(240, 248, 255, 180));
+                border: 2px solid rgba(255, 255, 255, 180);
+                border-radius: 15px;
+                text-shadow: 0 0 5px rgba(255, 255, 255, 100);
             }
         """)
         self.status_label.setParent(self)
-        self.status_label.move(self.width()//2 - 75, self.height() - 50)
+        self.status_label.move(self.width()//2 - 100, self.height() - 60)
     
     def setup_timers(self):
         self.reactor_timer = QTimer()
         self.reactor_timer.timeout.connect(self.update_arc_reactor)
         self.reactor_timer.start(50)
         
+        # Timer for checking notifications
+        self.notification_timer = QTimer()
+        self.notification_timer.timeout.connect(self.check_timer_notifications)
+        self.notification_timer.start(1000)  # Check every second
+        
+        # Timer for updating system info
+        self.system_info_timer = QTimer()
+        self.system_info_timer.timeout.connect(self.update_system_info)
+        self.system_info_timer.start(5000)  # Update every 5 seconds
+        
     def update_arc_reactor(self):
         if hasattr(self, 'arc_reactor'):
             self.arc_reactor.update()
     
+    def check_timer_notifications(self):
+        """Check for timer notifications and speak them"""
+        if hasattr(self.jarvis, 'timer_notifications') and self.jarvis.timer_notifications:
+            notification = self.jarvis.timer_notifications.pop(0)
+            self.add_message(notification, "ai")
+            self.speak_text(notification)
+        
+        # Update timer display
+        self.update_timer_display()
+    
+    def update_system_info(self):
+        """Update system information display"""
+        try:
+            now = datetime.now()
+            # Create bigger, more prominent date/time display
+            info = f"<div style='text-align: center; margin-bottom: 15px;'>"
+            info += f"<div style='font-size: 18px; font-weight: bold; color: #00f5ff; margin-bottom: 8px;'>"
+            info += f"{now.strftime('%A, %B %d, %Y')}</div>"
+            info += f"<div style='font-size: 22px; font-weight: bold; color: #ffffff; margin-bottom: 12px;'>"
+            info += f"{now.strftime('%H:%M:%S')}</div>"
+            info += f"</div>"
+            
+            # Add system info
+            info += f"<div style='font-size: 12px; color: #00a2ff;'>"
+            info += f"System: {platform.system()}<br>"
+            
+            # Add task summary
+            pending = len([t for t in self.jarvis.tasks if t.get('status') == 'pending'])
+            completed = len([t for t in self.jarvis.tasks if t.get('status') == 'completed'])
+            info += f"Tasks: {pending} pending, {completed} completed</div>"
+            
+            self.system_info_display.setText(info)
+        except Exception as e:
+            self.system_info_display.setText(f"Error: {str(e)}")
+    
+    def update_timer_display(self):
+        """Update timer display"""
+        try:
+            if not self.jarvis.active_timers and not self.jarvis.stopwatches:
+                self.timer_display.setText("No active operations")
+                return
+            
+            display_text = ""
+            
+            for name, info in self.jarvis.active_timers.items():
+                elapsed = datetime.now() - info['start_time']
+                remaining = timedelta(minutes=info['duration']) - elapsed
+                if remaining.total_seconds() > 0:
+                    display_text += f"Timer '{name}': {str(remaining).split('.')[0]}\n"
+            
+            for name, info in self.jarvis.stopwatches.items():
+                elapsed = datetime.now() - info['start_time']
+                display_text += f"Stopwatch '{name}': {str(elapsed).split('.')[0]}\n"
+            
+            self.timer_display.setText(display_text.strip() or "No active operations")
+        except Exception as e:
+            self.timer_display.setText(f"Error: {str(e)}")
+    
+    def show_daily_summary(self):
+        """Show daily summary"""
+        summary = self.jarvis.agent_daily_summary()
+        self.add_message(summary, "ai")
+        self.speak_text("Daily briefing ready, Sir.")
+    
+    def control_system(self, action):
+        """Control system functions"""
+        try:
+            if action == "volume_up":
+                result = self.jarvis.agent_control_volume("up")
+            elif action == "volume_down":
+                result = self.jarvis.agent_control_volume("down")
+            else:
+                result = f"Unknown action: {action}"
+            
+            self.add_message(result, "ai")
+        except Exception as e:
+            self.add_message(f"Error: {str(e)}", "ai")
+    
+    def start_timer_gui(self):
+        """Start timer from GUI"""
+        try:
+            duration_text = self.timer_input.text().strip()
+            if not duration_text:
+                self.add_message("Please enter timer duration in minutes", "ai")
+                return
+            
+            duration = float(duration_text)
+            result = self.jarvis.agent_start_timer(f"{duration},GUI_Timer")
+            self.add_message(result, "ai")
+            self.speak_text(f"Timer started for {duration} minutes")
+            self.timer_input.clear()
+        except ValueError:
+            self.add_message("Please enter a valid number for timer duration", "ai")
+        except Exception as e:
+            self.add_message(f"Error starting timer: {str(e)}", "ai")
+    
+    def start_stopwatch_gui(self):
+        """Start stopwatch from GUI"""
+        try:
+            result = self.jarvis.agent_start_stopwatch("GUI_Stopwatch")
+            self.add_message(result, "ai")
+            self.speak_text("Stopwatch started")
+        except Exception as e:
+            self.add_message(f"Error starting stopwatch: {str(e)}", "ai")
+    
+    def stop_all_timers(self):
+        """Stop all timers and stopwatches"""
+        try:
+            result = self.jarvis.agent_stop_timer("all")
+            self.add_message(result, "ai")
+            self.speak_text("All operations stopped")
+        except Exception as e:
+            self.add_message(f"Error stopping timers: {str(e)}", "ai")
+    
     def add_message(self, message, sender):
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        timestamp = datetime.now().strftime("%H:%M:%S")
         
         if sender == "user":
-            formatted_message = f"<div style='color: #00f5ff; margin: 10px 0;'><b>[{timestamp}] USER:</b></div>"
-            formatted_message += f"<div style='background: rgba(0, 245, 255, 20); padding: 10px; border-radius: 10px; margin: 5px 0 15px 20px; border-left: 3px solid #00f5ff;'>{message}</div>"
+            formatted_message = f"<div style='color: #00f5ff; margin: 15px 0; font-weight: bold;'><b>[{timestamp}] USER COMMAND:</b></div>"
+            formatted_message += f"<div style='background: rgba(0, 245, 255, 20); padding: 15px; border-radius: 12px; margin: 8px 0 20px 25px; border-left: 4px solid #00f5ff; color: #ffffff; font-weight: bold;'>{message}</div>"
         else:
-            formatted_message = f"<div style='color: #0080ff; margin: 10px 0;'><b>[{timestamp}] JARVIS:</b></div>"
-            formatted_message += f"<div style='background: rgba(0, 128, 255, 20); padding: 10px; border-radius: 10px; margin: 5px 0 15px 20px; border-left: 3px solid #0080ff;'>{message}</div>"
+            formatted_message = f"<div style='color: #0080ff; margin: 15px 0; font-weight: bold;'><b>[{timestamp}] J.A.R.V.I.S RESPONSE:</b></div>"
+            formatted_message += f"<div style='background: rgba(0, 128, 255, 20); padding: 15px; border-radius: 12px; margin: 8px 0 20px 25px; border-left: 4px solid #0080ff; color: #ffffff; font-weight: 500;'>{message}</div>"
         
         self.chat_messages.append(formatted_message)
         scrollbar = self.chat_messages.verticalScrollBar()
@@ -860,8 +1665,6 @@ class JarvisGUI(QMainWindow):
         self.add_message(message, "user")
         self.message_input.clear()
         self.status_label.setText("JARVIS PROCESSING...")
-        
-        # Process message in background thread
         self.response_thread = ResponseThread(self.jarvis, message)
         self.response_thread.response_ready.connect(self.handle_response)
         self.response_thread.start()
@@ -883,7 +1686,6 @@ class JarvisGUI(QMainWindow):
     def start_voice_recognition(self):
         if self.voice_thread and self.voice_thread.isRunning():
             return
-        
         self.is_listening = True
         self.voice_btn.setText("OFF")
         self.voice_btn.setStyleSheet("""
@@ -899,7 +1701,6 @@ class JarvisGUI(QMainWindow):
                 font-size: 14px;
             }
         """)
-        
         self.status_label.setText("JARVIS LISTENING...")
         self.voice_thread = VoiceThread(self.jarvis)
         self.voice_thread.voice_result.connect(self.handle_voice_result)
@@ -926,7 +1727,6 @@ class JarvisGUI(QMainWindow):
         
         if self.voice_thread:
             self.voice_thread.quit()
-    
     def handle_voice_result(self, text):
         self.message_input.setText(text)
         self.send_message()
@@ -937,22 +1737,25 @@ class JarvisGUI(QMainWindow):
         self.stop_voice_recognition()
         self.status_label.setText("JARVIS READY")
     def speak_text(self, text):
-        if self.is_speaking:
-            return
-        
-        self.is_speaking = True
+        # Allow multiple speech instances but queue them properly
         self.status_label.setText("JARVIS SPEAKING...")
+        
+        # Clean up previous speech thread if it's finished
+        if hasattr(self, 'speech_thread') and self.speech_thread and self.speech_thread.isFinished():
+            self.speech_thread.deleteLater()
         
         self.speech_thread = SpeechThread(self.jarvis, text)
         self.speech_thread.speech_finished.connect(self.speech_finished)
         self.speech_thread.start()
     
     def speech_finished(self):
-        self.is_speaking = False
         self.status_label.setText("JARVIS READY")
+        # Clean up the thread
+        if hasattr(self, 'speech_thread') and self.speech_thread:
+            self.speech_thread.deleteLater()
+            self.speech_thread = None
     
     def add_task(self):
-        """Add a new task"""
         task_text = self.task_input.text().strip()
         if not task_text:
             return
@@ -972,23 +1775,15 @@ class JarvisGUI(QMainWindow):
                 item_text += f" - Due: {task['due_date']}"
             
             item = QListWidgetItem(item_text)
-            if task['status'] == 'completed':
-                item.setStyleSheet("""
-                    QListWidgetItem {
-                        background: rgba(0, 255, 136, 30);
-                        border: 1px solid rgba(0, 255, 136, 60);
-                        text-decoration: line-through;
-                        color: rgba(255, 255, 255, 150);
-                    }
-                """)
-            elif task['priority'] == 'high':
-                item.setStyleSheet("""
-                    QListWidgetItem {
-                        background: rgba(255, 170, 0, 30);
-                        border: 1px solid rgba(255, 170, 0, 60);
-                    }
-                """)
             
+            # Use data to store styling info instead of setStyleSheet
+            if task['status'] == 'completed':
+                item.setData(Qt.UserRole + 1, 'completed')
+            elif task['priority'] == 'high':
+                item.setData(Qt.UserRole + 1, 'high')
+            else:
+                item.setData(Qt.UserRole + 1, 'normal')
+                
             item.setData(Qt.UserRole, task['id'])
             self.tasks_list.addItem(item)
     
@@ -1013,7 +1808,6 @@ class JarvisGUI(QMainWindow):
         if event.key() == Qt.Key_Escape:
             self.close()
         super().keyPressEvent(event)
-    
     def closeEvent(self, event):
         if hasattr(self, 'jarvis'):
             self.jarvis.save_data()
@@ -1031,7 +1825,6 @@ class JarvisGUI(QMainWindow):
         
         event.accept()
 
-
 class ArcReactorWidget(QWidget):
     
     def __init__(self):
@@ -1045,64 +1838,84 @@ class ArcReactorWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         center_x, center_y = self.width() // 2, self.height() // 2
-        outer_gradient = QRadialGradient(center_x, center_y, 140)
-        outer_gradient.setColorAt(0, QColor(0, 245, 255, 30))
-        outer_gradient.setColorAt(0.7, QColor(0, 128, 255, 20))
-        outer_gradient.setColorAt(1, QColor(0, 0, 0, 0))
         
+        # Outer holographic field (JARVIS style)
+        outer_gradient = QRadialGradient(center_x, center_y, 140)
+        outer_gradient.setColorAt(0, QColor(255, 255, 255, 40))
+        outer_gradient.setColorAt(0.5, QColor(135, 206, 250, 30))
+        outer_gradient.setColorAt(0.8, QColor(0, 191, 255, 20))
+        outer_gradient.setColorAt(1, QColor(240, 248, 255, 0))
         painter.setBrush(QBrush(outer_gradient))
         painter.setPen(Qt.NoPen)
         painter.drawEllipse(center_x - 140, center_y - 140, 280, 280)
+        
+        # Main reactor core (JARVIS white/blue theme)
         main_gradient = QRadialGradient(center_x, center_y, 110)
-        main_gradient.setColorAt(0, QColor(255, 255, 255, 200))
-        main_gradient.setColorAt(0.2, QColor(0, 245, 255, 180))
-        main_gradient.setColorAt(0.5, QColor(0, 128, 255, 120))
-        main_gradient.setColorAt(0.8, QColor(0, 26, 77, 100))
-        main_gradient.setColorAt(1, QColor(10, 10, 15, 200))
+        main_gradient.setColorAt(0, QColor(255, 255, 255, 220))
+        main_gradient.setColorAt(0.2, QColor(240, 248, 255, 200))
+        main_gradient.setColorAt(0.5, QColor(135, 206, 250, 160))
+        main_gradient.setColorAt(0.8, QColor(0, 191, 255, 120))
+        main_gradient.setColorAt(1, QColor(25, 25, 112, 150))
         painter.setBrush(QBrush(main_gradient))
-        painter.setPen(QPen(QColor(0, 245, 255, 150), 3))
+        painter.setPen(QPen(QColor(255, 255, 255, 180), 3))
         reactor_size = int(220 * self.pulse_scale)
         painter.drawEllipse(center_x - reactor_size//2, center_y - reactor_size//2, reactor_size, reactor_size)
+        
+        # Rotating energy rings (JARVIS style)
         painter.save()
         painter.translate(center_x, center_y)
         painter.rotate(self.rotation)
-        painter.setPen(QPen(QColor(0, 245, 255, 180), 2))
+        painter.setPen(QPen(QColor(255, 255, 255, 200), 3))
         painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(-90, -90, 180, 180)
         painter.rotate(-self.rotation * 1.5)
-        painter.setPen(QPen(QColor(0, 245, 255, 120), 1))
+        painter.setPen(QPen(QColor(0, 191, 255, 150), 2))
         painter.drawEllipse(-70, -70, 140, 140)
+        painter.rotate(self.rotation * 2)
+        painter.setPen(QPen(QColor(255, 255, 255, 100), 1))
+        painter.drawEllipse(-50, -50, 100, 100)
         painter.restore()
+        
+        # Central core (bright white JARVIS core)
         core_gradient = QRadialGradient(center_x, center_y, 35)
         core_gradient.setColorAt(0, QColor(255, 255, 255, 255))
-        core_gradient.setColorAt(0.3, QColor(0, 245, 255, 200))
-        core_gradient.setColorAt(1, QColor(0, 128, 255, 150))
+        core_gradient.setColorAt(0.3, QColor(240, 248, 255, 240))
+        core_gradient.setColorAt(0.7, QColor(135, 206, 250, 200))
+        core_gradient.setColorAt(1, QColor(0, 191, 255, 180))
         painter.setBrush(QBrush(core_gradient))
-        painter.setPen(QPen(QColor(0, 245, 255, 200), 2))
+        painter.setPen(QPen(QColor(255, 255, 255, 220), 2))
         core_size = int(70 * self.pulse_scale)
         painter.drawEllipse(center_x - core_size//2, center_y - core_size//2, core_size, core_size)
-        self.rotation += 2
+        
+        # JARVIS-style energy particles
+        painter.setPen(QPen(QColor(255, 255, 255, 120), 1))
+        for i in range(8):
+            angle = (self.rotation + i * 45) * 3.14159 / 180
+            x = center_x + 100 * np.cos(angle)
+            y = center_y + 100 * np.sin(angle)
+            painter.drawEllipse(int(x-2), int(y-2), 4, 4)
+        
+        self.rotation += 1.5
         if self.rotation >= 360:
             self.rotation = 0
-        self.pulse_scale += 0.005 * self.pulse_direction
-        if self.pulse_scale >= 1.1:
+        
+        self.pulse_scale += 0.003 * self.pulse_direction
+        if self.pulse_scale >= 1.08:
             self.pulse_direction = -1
-        elif self.pulse_scale <= 0.9:
+        elif self.pulse_scale <= 0.92:
             self.pulse_direction = 1
 
 def main():
     try:
-        logger.info("Starting JARVIS Neural Interface...")
-        logger.info("Testing JarvisAI initialization...")
+        logger.info("Starting Jarvis Interface...")
         jarvis = JarvisAI()
-        logger.info("JarvisAI initialized successfully!")
+        logger.info("Jarvis Online!")
         app = QApplication(sys.argv)
         app.setApplicationName("JARVIS Neural Interface")
         app.setApplicationVersion("2.3")
-        logger.info("Starting GUI...")
+        logger.info("Starting GUI for Jarvis...")
         jarvis_gui = JarvisGUI(jarvis)
         jarvis_gui.show()
-        logger.info("JARVIS Neural Interface ready!")
         sys.exit(app.exec_())
     except Exception as e:
         logger.error(f"Failed to start JARVIS: {e}")

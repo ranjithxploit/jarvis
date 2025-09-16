@@ -148,7 +148,7 @@ class ChatWidget(TransparentTextWidget):
         layout.addWidget(self.messages_area, 1)
         controls_layout = QHBoxLayout()
         controls_layout.setSpacing(10)
-        
+
         #voice button
         self.voice_btn = QPushButton("🎤 MIC OFF")
         self.voice_btn.setFixedHeight(45)
